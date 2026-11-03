@@ -52,7 +52,9 @@ with st.sidebar:
 if client_id and access_token:
     try:
         # 1. Connect to Broker
-        dhan = dhanhq(client_id, access_token)
+        from dhanhq import DhanContext
+        context = DhanContext(client_id, access_token)
+        dhan = dhanhq(context)
         
         # 2. Fetch Live Option Chain (NIFTY Index = "13")
         raw_chain = dhan.get_option_chain(
