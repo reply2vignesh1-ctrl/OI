@@ -2,5 +2,4 @@ streamlit
 pandas
 numpy
 plotly
-dhanhq>=2.3.0
-streamlit-autorefresh
+requests
