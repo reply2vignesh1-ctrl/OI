@@ -2,70 +2,96 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import io
 from datetime import datetime
+from dhanhq import dhanhq
+from streamlit_autorefresh import st_autorefresh
 
 # ==========================================
 # PAGE CONFIGURATION
 # ==========================================
-st.set_page_config(page_title="NIFTY OI Radar", layout="wide", initial_sidebar_state="expanded")
-st.title("🎯 NIFTY Options OI Dashboard")
+st.set_page_config(page_title="Live NIFTY OI Radar", layout="wide", initial_sidebar_state="expanded")
+st.title("🎯 Live NIFTY Options OI Dashboard")
+
+# Initialize Session Memory for Midday Comparison
+if 'morning_anchor' not in st.session_state:
+    st.session_state.morning_anchor = None
 
 # ==========================================
-# HELPER FUNCTIONS (From Import Data.txt)
-# ==========================================
-def clean_num(val):
-    if pd.isna(val): return 0.0
-    s = str(val).replace(',', '').replace('-', '').strip()
-    try: return float(s) if s not in ['-', '', 'nan', 'None'] else 0.0
-    except ValueError: return 0.0
-
-def load_nse_snapshot(file_bytes):
-    text = file_bytes.decode('utf-8', errors='ignore')
-    lines = text.splitlines()
-    hdr = next((i for i, l in enumerate(lines[:30]) if 'STRIKE' in l.upper() and 'OI' in l.upper()), None)
-    
-    if hdr is None:
-        st.error("⚠️ Could not find Option Chain columns in the uploaded file.")
-        return None
-        
-    raw_df = pd.read_csv(io.StringIO("\n".join(lines[hdr:])), on_bad_lines='skip')
-    
-    d = pd.DataFrame()
-    d['STRIKE'] = raw_df.iloc[:, 11].apply(clean_num)
-    d['CE_OI']  = raw_df.iloc[:, 1].apply(clean_num) / 100000.0
-    d['CE_CHG_OI'] = raw_df.iloc[:, 2].apply(clean_num) / 100000.0
-    d['CE_LTP'] = raw_df.iloc[:, 5].apply(clean_num)
-    d['PE_LTP'] = raw_df.iloc[:, 17].apply(clean_num)
-    d['PE_CHG_OI'] = raw_df.iloc[:, 20].apply(clean_num) / 100000.0
-    d['PE_OI']  = raw_df.iloc[:, 21].apply(clean_num) / 100000.0
-    
-    return d[d['STRIKE'] > 0].sort_values('STRIKE').reset_index(drop=True)
-
-# ==========================================
-# SIDEBAR: FILE UPLOADERS (Replaces Master Loader)
+# SIDEBAR: LIVE API CONNECTION
 # ==========================================
 with st.sidebar:
-    st.header("📂 Data Upload")
-    am_file = st.file_uploader("1. Upload Morning/Current CSV", type=['csv'])
-    pm_file = st.file_uploader("2. Upload Afternoon CSV (Optional)", type=['csv'])
+    st.header("🔌 Live Broker Connection")
+    st.markdown("Enter your DhanHQ API details below. These are not saved to the public code.")
+    
+    client_id = st.text_input("Client ID", type="password")
+    access_token = st.text_input("API Access Token", type="password")
+    expiry_date = st.text_input("Expiry Date (YYYY-MM-DD)", value="2026-11-26")
     
     st.markdown("---")
-    st.info("Upload just the first file for a live snapshot. Upload both to see Midday Session Comparisons.")
+    
+    # Auto-refresh timer: 180000 milliseconds = 3 minutes
+    st_autorefresh(interval=180000, limit=200, key="data_refresh")
+    st.success("🔄 Auto-refreshing every 3 minutes")
+    
+    st.markdown("---")
+    st.header("⏱️ Session Comparison")
+    if st.button("📸 Set Current Data as Morning Anchor"):
+        st.session_state.set_anchor_flag = True
+    else:
+        st.session_state.set_anchor_flag = False
+        
+    if st.session_state.morning_anchor is not None:
+        st.success("Morning anchor saved! Comparison chart is active.")
+        if st.button("Clear Anchor"):
+            st.session_state.morning_anchor = None
+            st.rerun()
 
 # ==========================================
-# MAIN EXECUTION
+# MAIN EXECUTION: FETCH LIVE DATA
 # ==========================================
-if am_file is not None:
-    df_am = load_nse_snapshot(am_file.getvalue())
-    
-    if df_am is not None:
-        # --- KEY CALCULATIONS ---
-        df = df_am.copy()
+if client_id and access_token:
+    try:
+        # 1. Connect to Broker
+        dhan = dhanhq(client_id, access_token)
+        
+        # 2. Fetch Live Option Chain (NIFTY Index = "13")
+        raw_chain = dhan.get_option_chain(
+            underlying_security_id="13", 
+            underlying_type="INDEX", 
+            expiry_date=expiry_date 
+        )
+        
+        # 3. Format Data
+        df = pd.DataFrame(raw_chain['data'])
+        df.rename(columns={
+            'strikePrice': 'STRIKE',
+            'callOI': 'CE_OI',
+            'callChangeInOI': 'CE_CHG_OI',
+            'callLTP': 'CE_LTP',
+            'putLTP': 'PE_LTP',
+            'putChangeInOI': 'PE_CHG_OI',
+            'putOI': 'PE_OI'
+        }, inplace=True)
+        
+        # Scale down to Lakhs
+        for col in ['CE_OI', 'CE_CHG_OI', 'PE_OI', 'PE_CHG_OI']:
+            df[col] = df[col] / 100000.0
+            
+        df = df[df['STRIKE'] > 0].sort_values('STRIKE').reset_index(drop=True)
+        
+        st.success(f"Live data fetched successfully at {datetime.now().strftime('%H:%M:%S')}")
+
+        # Save Morning Anchor if button was clicked
+        if st.session_state.set_anchor_flag:
+            st.session_state.morning_anchor = df.copy()
+            st.rerun()
+
+        # ==========================================
+        # KEY CALCULATIONS
+        # ==========================================
         v_ltp = df[(df['CE_LTP'] > 0) & (df['PE_LTP'] > 0)].copy()
         
         if v_ltp.empty:
-            st.warning("No valid LTP data — using max total OI strike as ATM proxy")
             df['_TOTAL_OI'] = df['CE_OI'] + df['PE_OI']
             atm_strike = int(df.loc[df['_TOTAL_OI'].idxmax(), 'STRIKE'])
             implied_fwd = atm_strike
@@ -80,17 +106,18 @@ if am_file is not None:
         macro_ce_strike = int(df.loc[df['CE_OI'].idxmax(), 'STRIKE'])
         macro_pe_strike = int(df.loc[df['PE_OI'].idxmax(), 'STRIKE'])
 
-        # Print Metrics Box
+        # Metrics Box
         st.subheader("📊 Key Market Levels")
         col1, col2, col3 = st.columns(3)
         col1.metric("ATM Strike", atm_strike)
         col2.metric("Implied Forward", implied_fwd)
         col3.metric("Straddle Premium", f"Rs. {straddle_prem}")
-        
         st.markdown(f"**MACRO WALLS:** Put Floor = {macro_pe_strike} | Call Ceiling = {macro_ce_strike}")
         st.markdown("---")
 
-        # --- TUG-OF-WAR CHART ---
+        # ==========================================
+        # CHART 1: TUG OF WAR
+        # ==========================================
         st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
         df_zoom = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
         
@@ -119,7 +146,9 @@ if am_file is not None:
         )
         st.plotly_chart(fig1, use_container_width=True)
 
-        # --- PLAIN ENGLISH ACTION BOARD ---
+        # ==========================================
+        # CHART 2: ACTION BOARD
+        # ==========================================
         st.subheader("📋 Today's Change in OI (Action Board)")
         board = df_zoom.copy()
         board['NET_FLOW'] = board['PE_CHG_OI'] - board['CE_CHG_OI']
@@ -148,14 +177,16 @@ if am_file is not None:
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        # --- MIDDAY SESSION COMPARISON (If 2nd file is uploaded) ---
-        if pm_file is not None:
+        # ==========================================
+        # CHART 3: MIDDAY SESSION COMPARISON
+        # ==========================================
+        if st.session_state.morning_anchor is not None:
             st.markdown("---")
-            st.subheader("⏱️ Pure Midday Session Comparison")
-            df_pm = load_nse_snapshot(pm_file.getvalue())
+            st.subheader("⏱️ Pure Midday Session Comparison (Anchor vs Live)")
             
+            df_am = st.session_state.morning_anchor
             merged = pd.merge(
-                df_am[['STRIKE', 'CE_OI', 'PE_OI']], df_pm[['STRIKE', 'CE_OI', 'PE_OI']],
+                df_am[['STRIKE', 'CE_OI', 'PE_OI']], df[['STRIKE', 'CE_OI', 'PE_OI']],
                 on='STRIKE', suffixes=('_AM', '_PM')
             )
             merged['CE_DELTA'] = merged['CE_OI_PM'] - merged['CE_OI_AM']
@@ -185,6 +216,8 @@ if am_file is not None:
                 yaxis=dict(dtick=50), margin=dict(l=0, r=0, t=30, b=0)
             )
             st.plotly_chart(fig3, use_container_width=True)
-            
+
+    except Exception as e:
+        st.error(f"Failed to fetch live data: {e}. Please check your API credentials and expiry date format.")
 else:
-    st.info("👈 Please upload an NSE Option Chain CSV file in the sidebar to begin.")
+    st.info("👈 Enter your DhanHQ API credentials and the current Expiry Date in the sidebar to start the live feed.")
