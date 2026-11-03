@@ -18,9 +18,14 @@ if 'morning_anchor' not in st.session_state:
 # SIDEBAR: CONTROLS
 # ==========================================
 with st.sidebar:
-    st.header("🔄 Live Data Controls")
+    st.header("🔌 Live Broker Connection")
+    st.markdown("*(Direct REST API Connection)*")
     
-    if st.button("Fetch Live NSE Data", use_container_width=True):
+    client_id = st.text_input("Client ID", type="password")
+    access_token = st.text_input("API Access Token", type="password")
+    expiry_date = st.text_input("Expiry Date (YYYY-MM-DD)", value="2026-11-05")
+    
+    if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
         
     st.markdown("---")
@@ -37,126 +42,180 @@ with st.sidebar:
             st.rerun()
 
 # ==========================================
-# NSE API SCRAPER
+# DHAN DIRECT REST API
 # ==========================================
-def fetch_nse_data():
+def fetch_dhan_rest_api(cid, token, exp):
+    url = "https://api.dhan.co/v2/optionchain"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br"
+        "client-id": cid,
+        "access-token": token,
+        "Content-Type": "application/json"
     }
-    url = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY"
+    payload = {
+        "UnderlyingScrip": 13,
+        "UnderlyingSeg": "IDX_I",
+        "Expiry": exp
+    }
     
     try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5) # Get cookies
-        response = session.get(url, headers=headers, timeout=5)
-        data = response.json()
+        response = requests.post(url, headers=headers, json=payload)
         
+        if response.status_code != 200:
+            st.error(f"Broker API Error: {response.text}")
+            return None
+            
+        data = response.json()
         records = []
-        for item in data['records']['data']:
-            strike = item.get('strikePrice')
-            ce = item.get('CE', {})
-            pe = item.get('PE', {})
+        
+        # Navigate Dhan's raw JSON structure
+        oc_data = data.get('data', {}).get('oc', {})
+        
+        for strike_str, options in oc_data.items():
+            strike = float(strike_str)
+            ce = options.get('ce', {})
+            pe = options.get('pe', {})
+            
+            # Calculate Intraday Change in OI (Current - Previous)
+            ce_oi = ce.get('oi', 0)
+            ce_chg_oi = ce_oi - ce.get('previous_oi', 0)
+            
+            pe_oi = pe.get('oi', 0)
+            pe_chg_oi = pe_oi - pe.get('previous_oi', 0)
             
             records.append({
                 'STRIKE': strike,
-                'CE_OI': ce.get('openInterest', 0) / 100000.0 if ce.get('openInterest') else 0,
-                'CE_CHG_OI': ce.get('changeinOpenInterest', 0) / 100000.0 if ce.get('changeinOpenInterest') else 0,
-                'CE_LTP': ce.get('lastPrice', 0),
-                'PE_OI': pe.get('openInterest', 0) / 100000.0 if pe.get('openInterest') else 0,
-                'PE_CHG_OI': pe.get('changeinOpenInterest', 0) / 100000.0 if pe.get('changeinOpenInterest') else 0,
-                'PE_LTP': pe.get('lastPrice', 0)
+                'CE_OI': ce_oi / 100000.0,
+                'CE_CHG_OI': ce_chg_oi / 100000.0,
+                'CE_LTP': ce.get('last_price', 0),
+                'PE_OI': pe_oi / 100000.0,
+                'PE_CHG_OI': pe_chg_oi / 100000.0,
+                'PE_LTP': pe.get('last_price', 0)
             })
+            
         return pd.DataFrame(records).sort_values('STRIKE').reset_index(drop=True)
+        
     except Exception as e:
-        st.error(f"Failed to fetch data from NSE. Please try clicking refresh again. Error: {e}")
+        st.error(f"Failed to parse broker data. Error: {e}")
         return None
 
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
-df = fetch_nse_data()
-
-if df is not None and not df.empty:
-    st.success(f"Live NSE data fetched successfully at {datetime.now().strftime('%H:%M:%S')}")
-
-    # Save Morning Anchor if button was clicked
-    if st.session_state.set_anchor_flag:
-        st.session_state.morning_anchor = df.copy()
-        st.rerun()
-
-    # ==========================================
-    # KEY CALCULATIONS
-    # ==========================================
-    v_ltp = df[(df['CE_LTP'] > 0) & (df['PE_LTP'] > 0)].copy()
+if client_id and access_token:
+    df = fetch_dhan_rest_api(client_id, access_token, expiry_date)
     
-    if v_ltp.empty:
-        df['_TOTAL_OI'] = df['CE_OI'] + df['PE_OI']
-        atm_strike = int(df.loc[df['_TOTAL_OI'].idxmax(), 'STRIKE'])
-        implied_fwd = atm_strike
-        straddle_prem = 0
-    else:
-        v_ltp['DIFF'] = (v_ltp['CE_LTP'] - v_ltp['PE_LTP']).abs()
-        atm_r = v_ltp.loc[v_ltp['DIFF'].idxmin()]
-        atm_strike = int(atm_r['STRIKE'])
-        implied_fwd = round(atm_strike + (atm_r['CE_LTP'] - atm_r['PE_LTP']), 1)
-        straddle_prem = round(atm_r['CE_LTP'] + atm_r['PE_LTP'], 1)
+    if df is not None and not df.empty:
+        st.success(f"Live API data fetched successfully at {datetime.now().strftime('%H:%M:%S')}")
 
-    macro_ce_strike = int(df.loc[df['CE_OI'].idxmax(), 'STRIKE'])
-    macro_pe_strike = int(df.loc[df['PE_OI'].idxmax(), 'STRIKE'])
+        if st.session_state.set_anchor_flag:
+            st.session_state.morning_anchor = df.copy()
+            st.rerun()
 
-    st.subheader("📊 Key Market Levels")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("ATM Strike", atm_strike)
-    col2.metric("Implied Forward", implied_fwd)
-    col3.metric("Straddle Premium", f"Rs. {straddle_prem}")
+        # KEY CALCULATIONS
+        v_ltp = df[(df['CE_LTP'] > 0) & (df['PE_LTP'] > 0)].copy()
+        
+        if v_ltp.empty:
+            df['_TOTAL_OI'] = df['CE_OI'] + df['PE_OI']
+            atm_strike = int(df.loc[df['_TOTAL_OI'].idxmax(), 'STRIKE'])
+            implied_fwd = atm_strike
+            straddle_prem = 0
+        else:
+            v_ltp['DIFF'] = (v_ltp['CE_LTP'] - v_ltp['PE_LTP']).abs()
+            atm_r = v_ltp.loc[v_ltp['DIFF'].idxmin()]
+            atm_strike = int(atm_r['STRIKE'])
+            implied_fwd = round(atm_strike + (atm_r['CE_LTP'] - atm_r['PE_LTP']), 1)
+            straddle_prem = round(atm_r['CE_LTP'] + atm_r['PE_LTP'], 1)
 
-    # ==========================================
-    # CHART 1: TUG OF WAR
-    # ==========================================
-    st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
-    df_zoom = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
-    
-    fig1 = go.Figure()
-    fig1.add_trace(go.Bar(
-        y=df_zoom['STRIKE'], x=-df_zoom['CE_OI'],
-        orientation='h', name='🔴 Call OI', marker_color='#ef4444',
-        text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['CE_OI']], textposition='outside'
-    ))
-    fig1.add_trace(go.Bar(
-        y=df_zoom['STRIKE'], x=df_zoom['PE_OI'],
-        orientation='h', name='🟢 Put OI', marker_color='#22c55e',
-        text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['PE_OI']], textposition='outside'
-    ))
-    fig1.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
-    fig1.add_vline(x=0, line_width=2, line_color="#ffffff")
-    fig1.update_layout(barmode='overlay', height=600, xaxis=dict(title="Calls ◄ | ► Puts"))
-    st.plotly_chart(fig1, use_container_width=True)
+        macro_ce_strike = int(df.loc[df['CE_OI'].idxmax(), 'STRIKE'])
+        macro_pe_strike = int(df.loc[df['PE_OI'].idxmax(), 'STRIKE'])
 
-    # ==========================================
-    # CHART 2: ACTION BOARD
-    # ==========================================
-    st.subheader("📋 Today's Change in OI")
-    board = df_zoom.copy()
-    board['NET_FLOW'] = board['PE_CHG_OI'] - board['CE_CHG_OI']
-    
-    word_labels = []
-    for _, r in board.iterrows():
-        net = r['NET_FLOW']
-        if net >= 0.35: action = "🟢 STRONG PUT FLOOR BUILT"
-        elif net >= 0.12: action = "🟢 Mild Put Support"
-        elif net <= -0.35: action = "🔴 HEAVY CALL CEILING BUILT"
-        elif net <= -0.12: action = "🔴 Mild Call Resistance"
-        else: action = "⚪ Balanced Fight"
-        word_labels.append(f"<b>{net:+.2f}L</b> → {action}")
+        st.subheader("📊 Key Market Levels")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("ATM Strike", atm_strike)
+        col2.metric("Implied Forward", implied_fwd)
+        col3.metric("Straddle Premium", f"Rs. {straddle_prem}")
 
-    bar_colors = ['#22c55e' if v >= 0 else '#ef4444' for v in board['NET_FLOW']]
-    fig2 = go.Figure()
-    fig2.add_trace(go.Bar(
-        y=board['STRIKE'], x=board['NET_FLOW'], orientation='h',
-        marker_color=bar_colors, text=word_labels, textposition='outside'
-    ))
-    fig2.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
-    fig2.update_layout(height=600, xaxis=dict(title="Bearish ◄ | ► Bullish"))
-    st.plotly_chart(fig2, use_container_width=True)
+        # CHART 1: TUG OF WAR
+        st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
+        df_zoom = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
+        
+        fig1 = go.Figure()
+        fig1.add_trace(go.Bar(
+            y=df_zoom['STRIKE'], x=-df_zoom['CE_OI'],
+            orientation='h', name='🔴 Call OI', marker_color='#ef4444',
+            text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['CE_OI']], textposition='outside'
+        ))
+        fig1.add_trace(go.Bar(
+            y=df_zoom['STRIKE'], x=df_zoom['PE_OI'],
+            orientation='h', name='🟢 Put OI', marker_color='#22c55e',
+            text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['PE_OI']], textposition='outside'
+        ))
+        fig1.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
+        fig1.add_vline(x=0, line_width=2, line_color="#ffffff")
+        max_side = max(df_zoom['CE_OI'].max(), df_zoom['PE_OI'].max()) * 1.45 if not df_zoom.empty else 1
+        fig1.update_layout(barmode='overlay', height=600, xaxis=dict(range=[-max_side, max_side], title="Calls ◄ | ► Puts"))
+        st.plotly_chart(fig1, use_container_width=True)
+
+        # CHART 2: ACTION BOARD
+        st.subheader("📋 Today's Change in OI")
+        board = df_zoom.copy()
+        board['NET_FLOW'] = board['PE_CHG_OI'] - board['CE_CHG_OI']
+        
+        word_labels = []
+        for _, r in board.iterrows():
+            net = r['NET_FLOW']
+            if net >= 0.35: action = "🟢 STRONG PUT FLOOR BUILT"
+            elif net >= 0.12: action = "🟢 Mild Put Support"
+            elif net <= -0.35: action = "🔴 HEAVY CALL CEILING BUILT"
+            elif net <= -0.12: action = "🔴 Mild Call Resistance"
+            else: action = "⚪ Balanced Fight"
+            word_labels.append(f"<b>{net:+.2f}L</b> → {action}")
+
+        bar_colors = ['#22c55e' if v >= 0 else '#ef4444' for v in board['NET_FLOW']]
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(
+            y=board['STRIKE'], x=board['NET_FLOW'], orientation='h',
+            marker_color=bar_colors, text=word_labels, textposition='outside'
+        ))
+        fig2.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
+        max_x2 = max(board['NET_FLOW'].abs().max(), 0.2) * 2.35 if not board.empty else 1
+        fig2.update_layout(height=600, xaxis=dict(range=[-max_x2, max_x2], title="Bearish ◄ | ► Bullish"))
+        st.plotly_chart(fig2, use_container_width=True)
+        
+        # CHART 3: SESSION COMPARISON
+        if st.session_state.morning_anchor is not None:
+            st.markdown("---")
+            st.subheader("⏱️ Pure Midday Session Comparison (Anchor vs Live)")
+            
+            df_am = st.session_state.morning_anchor
+            merged = pd.merge(
+                df_am[['STRIKE', 'CE_OI', 'PE_OI']], df[['STRIKE', 'CE_OI', 'PE_OI']],
+                on='STRIKE', suffixes=('_AM', '_PM')
+            )
+            merged['CE_DELTA'] = merged['CE_OI_PM'] - merged['CE_OI_AM']
+            merged['PE_DELTA'] = merged['PE_OI_PM'] - merged['PE_OI_AM']
+            merged['NET_DELTA'] = merged['PE_DELTA'] - merged['CE_DELTA']
+            
+            m_view = merged[(merged['STRIKE'] >= atm_strike - 300) & (merged['STRIKE'] <= atm_strike + 300)]
+            
+            labels = []
+            for _, r in m_view.iterrows():
+                net_d = r['NET_DELTA']
+                if net_d >= 0.10: text = "Net Put Built"
+                elif net_d <= -0.10: text = "Net Call Built"
+                else: text = "Minimal Change"
+                labels.append(f"<b>{net_d:+.2f}L</b> → {text}")
+
+            colors3 = ['#22c55e' if v >= 0 else '#ef4444' for v in m_view['NET_DELTA']]
+            fig3 = go.Figure()
+            fig3.add_trace(go.Bar(
+                y=m_view['STRIKE'], x=m_view['NET_DELTA'], orientation='h',
+                marker_color=colors3, text=labels, textposition='outside'
+            ))
+            fig3.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
+            max_x3 = max(m_view['NET_DELTA'].abs().max(), 0.15) * 2.10 if not m_view.empty else 1
+            fig3.update_layout(height=600, xaxis=dict(range=[-max_x3, max_x3], title="Net Call Add ◄ | ► Net Put Add"))
+            st.plotly_chart(fig3, use_container_width=True)
+
+else:
+    st.info("👈 Enter your Dhan credentials to securely fetch data.")
