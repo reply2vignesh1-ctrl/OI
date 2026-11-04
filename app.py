@@ -59,7 +59,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🔄 Fetch Data")
-    expiry_format = st.text_input("Expiry Symbol Format", value="26N05")
+    # Expiry Input REMOVED! The API will now auto-detect the active chain.
     
     if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
@@ -78,86 +78,83 @@ with st.sidebar:
             st.rerun()
 
 # ==========================================
-# FYERS DATA FETCHER
+# FYERS DATA FETCHER (NATIVE OPTION CHAIN)
 # ==========================================
-def fetch_fyers_oc(client_id, access_token, exp_fmt):
+def fetch_fyers_oc(client_id, access_token):
     fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
     
     try:
-        # 1. Fetch Spot Index temporarily just to center our strike window
-        idx_resp = fyers.quotes({"symbols": "NSE:NIFTY50-INDEX"})
-        if 'd' not in idx_resp or not idx_resp['d']:
-            st.error("Failed to fetch NIFTY Index.")
+        # Native Option Chain API automatically fetches the nearest valid expiry and handles unlisted strikes
+        req_data = {
+            "symbol": "NSE:NIFTY50-INDEX",
+            "strikecount": 15  # Fetches 15 strikes above and 15 below the ATM
+        }
+        
+        resp = fyers.optionchain(req_data)
+        
+        if resp.get('s') != 'ok' or 'data' not in resp:
+            st.error(f"API Error: {resp.get('message', 'Unknown Error')}")
             return None
             
-        spot = idx_resp['d'][0]['v']['lp']
-        center_strike = int(round(spot / 50.0)) * 50
+        chain_data = resp['data'].get('optionsChain', [])
         
-        # 2. Build wide Option Chain (ATM ± 1000 points) to ensure True Implied ATM is captured
-        strikes = range(center_strike - 1000, center_strike + 1050, 50)
-        symbols = [f"NSE:NIFTY{exp_fmt}{s}CE" for s in strikes] + [f"NSE:NIFTY{exp_fmt}{s}PE" for s in strikes]
-        
-        # 3. Fetch in chunks (Fyers limit is 50 symbols per request)
         records = []
-        for i in range(0, len(symbols), 50):
-            chunk = symbols[i:i+50]
-            resp = fyers.quotes({"symbols": ",".join(chunk)})
+        for opt in chain_data:
+            opt_type = opt.get('option_type')
             
-            if 'd' in resp:
-                for q in resp['d']:
-                    sym = q['n']
-                    v = q['v']
-                    opt_type = sym[-2:] 
-                    strike = int(sym.replace(f"NSE:NIFTY{exp_fmt}", "").replace(opt_type, ""))
-                    
-                    # Extract FYERS Previous Day OI (pdoi) for True Intraday Change in OI
-                    current_oi = v.get('oi', 0)
-                    prev_oi = v.get('pdoi', current_oi) 
-                    chg_oi = current_oi - prev_oi
-                    
-                    records.append({
-                        'STRIKE': strike,
-                        'TYPE': opt_type,
-                        'OI': current_oi / 100000.0,
-                        'CHG_OI': chg_oi / 100000.0,
-                        'LTP': v.get('lp', 0)
-                    })
-                    
-        # 4. Format DataFrame
+            # Skip the underlying index itself (which has an empty option_type)
+            if opt_type not in ['CE', 'PE']:
+                continue
+                
+            current_oi = opt.get('oi', 0)
+            prev_oi = opt.get('prev_oi', current_oi)
+            
+            records.append({
+                'STRIKE': int(opt.get('strike_price', 0)),
+                'TYPE': opt_type,
+                'OI': current_oi / 100000.0,
+                'CHG_OI': (current_oi - prev_oi) / 100000.0,
+                'LTP': opt.get('ltp', 0)
+            })
+            
+        if not records:
+            st.warning("No active premium data returned from Option Chain API.")
+            return None
+            
+        # Format DataFrame
         df_raw = pd.DataFrame(records)
         ce_df = df_raw[df_raw['TYPE'] == 'CE'].rename(columns={'OI': 'CE_OI', 'CHG_OI': 'CE_CHG_OI', 'LTP': 'CE_LTP'}).drop('TYPE', axis=1)
         pe_df = df_raw[df_raw['TYPE'] == 'PE'].rename(columns={'OI': 'PE_OI', 'CHG_OI': 'PE_CHG_OI', 'LTP': 'PE_LTP'}).drop('TYPE', axis=1)
         
         df = pd.merge(ce_df, pe_df, on='STRIKE', how='outer').fillna(0).sort_values('STRIKE').reset_index(drop=True)
         return df
+        
     except Exception as e:
-        st.error(f"Fyers API Error: {e}")
+        st.error(f"Fyers Option Chain Error: {e}")
         return None
 
 # ==========================================
 # MAIN EXECUTION & QUANTITATIVE ENGINE
 # ==========================================
 if st.session_state.fetch_now and st.session_state.fyers_access_token:
-    st.session_state.live_df = fetch_fyers_oc(app_id, st.session_state.fyers_access_token, expiry_format)
+    st.session_state.live_df = fetch_fyers_oc(app_id, st.session_state.fyers_access_token)
     st.session_state.fetch_now = False
 
 df = st.session_state.live_df
 
 if df is not None and not df.empty:
-    st.success(f"Dashboard updated. Displaying latest fetched data.")
+    st.success("Dashboard updated. Displaying latest fetched data.")
 
     if st.session_state.set_anchor_flag:
         st.session_state.morning_anchor = df.copy()
         st.session_state.set_anchor_flag = False
         st.rerun()
 
-    # ==========================================
     # TRUE IMPLIED ATM & STRADDLE CALCULATIONS
-    # ==========================================
     v_ltp = df[(df['CE_LTP'] > 0) & (df['PE_LTP'] > 0)].copy()
     
     if v_ltp.empty:
-        st.warning("No active premium data found. Check expiry format.")
+        st.warning("No active premium data found.")
         st.stop()
         
     v_ltp['DIFF'] = (v_ltp['CE_LTP'] - v_ltp['PE_LTP']).abs()
@@ -167,15 +164,12 @@ if df is not None and not df.empty:
     implied_fwd = round(atm_strike + (atm_r['CE_LTP'] - atm_r['PE_LTP']), 2)
     straddle_prem = round(atm_r['CE_LTP'] + atm_r['PE_LTP'], 2)
 
-    # ==========================================
     # PCR & GREEK-WEIGHTED METRICS
-    # ==========================================
     pcr_overall = df['PE_OI'].sum() / df['CE_OI'].sum() if df['CE_OI'].sum() > 0 else 0
     
     df_300 = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
     pcr_300 = df_300['PE_OI'].sum() / df_300['CE_OI'].sum() if df_300['CE_OI'].sum() > 0 else 0
     
-    # Rupee/Premium Weighted PCR
     pe_rupee = (df['PE_OI'] * df['PE_LTP']).sum()
     ce_rupee = (df['CE_OI'] * df['CE_LTP']).sum()
     pcr_rupee = pe_rupee / ce_rupee if ce_rupee > 0 else 0
@@ -193,9 +187,7 @@ if df is not None and not df.empty:
     c7.metric("Macro Call Ceiling", int(df.loc[df['CE_OI'].idxmax(), 'STRIKE']))
     c8.metric("Macro Put Floor", int(df.loc[df['PE_OI'].idxmax(), 'STRIKE']))
 
-    # ==========================================
     # CHART 1: TUG OF WAR (TOTAL OI)
-    # ==========================================
     st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
@@ -214,9 +206,7 @@ if df is not None and not df.empty:
     fig1.update_layout(barmode='overlay', height=600, xaxis=dict(range=[-max_side1, max_side1], title="Calls ◄ | ► Puts"))
     st.plotly_chart(fig1, use_container_width=True)
 
-    # ==========================================
     # CHART 2: ACTION BOARD (INTRADAY CHG IN OI)
-    # ==========================================
     st.subheader("📋 Today's Change in OI (Action Board)")
     board = df_300.copy()
     board['NET_FLOW'] = board['PE_CHG_OI'] - board['CE_CHG_OI']
@@ -242,9 +232,7 @@ if df is not None and not df.empty:
     fig2.update_layout(height=600, xaxis=dict(range=[-max_x2, max_x2], title="Bearish Flow ◄ | ► Bullish Flow"))
     st.plotly_chart(fig2, use_container_width=True)
     
-    # ==========================================
     # CHART 3: PURE MIDDAY SESSION COMPARISON
-    # ==========================================
     if st.session_state.morning_anchor is not None:
         st.markdown("---")
         st.subheader("⏱️ Session Comparison (Anchor vs Live)")
