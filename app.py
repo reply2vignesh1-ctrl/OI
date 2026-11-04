@@ -212,4 +212,6 @@ if df is not None and not df.empty:
         for _, r in m_view.iterrows():
             net_d = r['NET_DELTA']
             if net_d >= 0.10: text = "Net Put Built"
-            elif net_d <= -0.1:
+            elif net_d <= -0.10: text = "Net Call Built"
+            else: text = "Minimal Change"
+            labels.append(f"<b>{net_d:+.2f}L</b> → {text}")
