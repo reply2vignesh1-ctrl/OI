@@ -32,7 +32,6 @@ with st.sidebar:
     
     st.markdown("### 🔐 Authentication")
     if app_id and secret_id:
-        # Generate the login link
         session = fyersModel.SessionModel(
             client_id=app_id, secret_key=secret_id, 
             redirect_uri="https://127.0.0.1", response_type='code', grant_type='authorization_code'
@@ -40,13 +39,12 @@ with st.sidebar:
         auth_link = session.generate_authcode()
         
         st.markdown(f"**Step 1:** [Click here to Login to FYERS]({auth_link})")
-        st.caption("After logging in, you will be redirected to an error page (127.0.0.1). This is normal! Just copy the entire URL from your browser's address bar.")
+        st.caption("After logging in, you will be redirected to an error page (127.0.0.1). Copy the entire URL from your address bar.")
         
         auth_input = st.text_input("**Step 2:** Paste the Redirect URL here:")
         
         if st.button("Connect App", use_container_width=True):
             try:
-                # Parse the auth code out of the pasted URL
                 if "auth_code=" in auth_input:
                     code = auth_input.split("auth_code=")[1].split("&")[0]
                 else:
@@ -61,7 +59,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🔄 Fetch Data")
-    expiry_format = st.text_input("Expiry Symbol Format", value="26N05", help="Format: YY + Month(N/O/D) + DD. Example: 26N05 for Nov 5 2026")
+    expiry_format = st.text_input("Expiry Symbol Format", value="26N05")
     
     if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
@@ -86,20 +84,20 @@ def fetch_fyers_oc(client_id, access_token, exp_fmt):
     fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
     
     try:
-        # 1. Get NIFTY 50 LTP to find the ATM strike
+        # 1. Fetch Spot Index temporarily just to center our strike window
         idx_resp = fyers.quotes({"symbols": "NSE:NIFTY50-INDEX"})
         if 'd' not in idx_resp or not idx_resp['d']:
-            st.error("Failed to fetch NIFTY Index. Check API connection.")
+            st.error("Failed to fetch NIFTY Index.")
             return None
             
-        nifty_ltp = idx_resp['d'][0]['v']['lp']
-        atm = int(round(nifty_ltp / 50.0)) * 50
+        spot = idx_resp['d'][0]['v']['lp']
+        center_strike = int(round(spot / 50.0)) * 50
         
-        # 2. Build symbols for Option Chain (ATM ± 400 points)
-        strikes = range(atm - 400, atm + 450, 50)
+        # 2. Build wide Option Chain (ATM ± 1000 points) to ensure True Implied ATM is captured
+        strikes = range(center_strike - 1000, center_strike + 1050, 50)
         symbols = [f"NSE:NIFTY{exp_fmt}{s}CE" for s in strikes] + [f"NSE:NIFTY{exp_fmt}{s}PE" for s in strikes]
         
-        # 3. Fetch Quotes in chunks (Fyers max is 50 symbols per request)
+        # 3. Fetch in chunks (Fyers limit is 50 symbols per request)
         records = []
         for i in range(0, len(symbols), 50):
             chunk = symbols[i:i+50]
@@ -109,35 +107,35 @@ def fetch_fyers_oc(client_id, access_token, exp_fmt):
                 for q in resp['d']:
                     sym = q['n']
                     v = q['v']
-                    opt_type = sym[-2:] # CE or PE
+                    opt_type = sym[-2:] 
                     strike = int(sym.replace(f"NSE:NIFTY{exp_fmt}", "").replace(opt_type, ""))
+                    
+                    # Extract FYERS Previous Day OI (pdoi) for True Intraday Change in OI
+                    current_oi = v.get('oi', 0)
+                    prev_oi = v.get('pdoi', current_oi) 
+                    chg_oi = current_oi - prev_oi
                     
                     records.append({
                         'STRIKE': strike,
                         'TYPE': opt_type,
-                        'OI': v.get('oi', 0) / 100000.0,
+                        'OI': current_oi / 100000.0,
+                        'CHG_OI': chg_oi / 100000.0,
                         'LTP': v.get('lp', 0)
                     })
                     
-        # 4. Format into our Dashboard DataFrame
+        # 4. Format DataFrame
         df_raw = pd.DataFrame(records)
-        ce_df = df_raw[df_raw['TYPE'] == 'CE'].rename(columns={'OI': 'CE_OI', 'LTP': 'CE_LTP'}).drop('TYPE', axis=1)
-        pe_df = df_raw[df_raw['TYPE'] == 'PE'].rename(columns={'OI': 'PE_OI', 'LTP': 'PE_LTP'}).drop('TYPE', axis=1)
+        ce_df = df_raw[df_raw['TYPE'] == 'CE'].rename(columns={'OI': 'CE_OI', 'CHG_OI': 'CE_CHG_OI', 'LTP': 'CE_LTP'}).drop('TYPE', axis=1)
+        pe_df = df_raw[df_raw['TYPE'] == 'PE'].rename(columns={'OI': 'PE_OI', 'CHG_OI': 'PE_CHG_OI', 'LTP': 'PE_LTP'}).drop('TYPE', axis=1)
         
         df = pd.merge(ce_df, pe_df, on='STRIKE', how='outer').fillna(0).sort_values('STRIKE').reset_index(drop=True)
-        
-        # Fyers Quotes API does not provide previous day OI directly, so intraday change is held at 0.
-        # The Anchor Comparison Chart will still calculate exact Session Changes perfectly!
-        df['CE_CHG_OI'] = 0  
-        df['PE_CHG_OI'] = 0
-        
         return df
     except Exception as e:
         st.error(f"Fyers API Error: {e}")
         return None
 
 # ==========================================
-# MAIN EXECUTION
+# MAIN EXECUTION & QUANTITATIVE ENGINE
 # ==========================================
 if st.session_state.fetch_now and st.session_state.fyers_access_token:
     st.session_state.live_df = fetch_fyers_oc(app_id, st.session_state.fyers_access_token, expiry_format)
@@ -153,52 +151,103 @@ if df is not None and not df.empty:
         st.session_state.set_anchor_flag = False
         st.rerun()
 
-    # KEY CALCULATIONS
+    # ==========================================
+    # TRUE IMPLIED ATM & STRADDLE CALCULATIONS
+    # ==========================================
     v_ltp = df[(df['CE_LTP'] > 0) & (df['PE_LTP'] > 0)].copy()
     
     if v_ltp.empty:
-        df['_TOTAL_OI'] = df['CE_OI'] + df['PE_OI']
-        atm_strike = int(df.loc[df['_TOTAL_OI'].idxmax(), 'STRIKE'])
-        implied_fwd = atm_strike
-        straddle_prem = 0
-    else:
-        v_ltp['DIFF'] = (v_ltp['CE_LTP'] - v_ltp['PE_LTP']).abs()
-        atm_r = v_ltp.loc[v_ltp['DIFF'].idxmin()]
-        atm_strike = int(atm_r['STRIKE'])
-        implied_fwd = round(atm_strike + (atm_r['CE_LTP'] - atm_r['PE_LTP']), 1)
-        straddle_prem = round(atm_r['CE_LTP'] + atm_r['PE_LTP'], 1)
-
-    st.subheader("📊 Key Market Levels")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("ATM Strike", atm_strike)
-    col2.metric("Implied Forward", implied_fwd)
-    col3.metric("Straddle Premium", f"Rs. {straddle_prem}")
-
-    # CHART 1: TUG OF WAR
-    st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
-    df_zoom = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
+        st.warning("No active premium data found. Check expiry format.")
+        st.stop()
+        
+    v_ltp['DIFF'] = (v_ltp['CE_LTP'] - v_ltp['PE_LTP']).abs()
+    atm_r = v_ltp.loc[v_ltp['DIFF'].idxmin()]
+    atm_strike = int(atm_r['STRIKE'])
     
+    implied_fwd = round(atm_strike + (atm_r['CE_LTP'] - atm_r['PE_LTP']), 2)
+    straddle_prem = round(atm_r['CE_LTP'] + atm_r['PE_LTP'], 2)
+
+    # ==========================================
+    # PCR & GREEK-WEIGHTED METRICS
+    # ==========================================
+    pcr_overall = df['PE_OI'].sum() / df['CE_OI'].sum() if df['CE_OI'].sum() > 0 else 0
+    
+    df_300 = df[(df['STRIKE'] >= atm_strike - 300) & (df['STRIKE'] <= atm_strike + 300)].copy()
+    pcr_300 = df_300['PE_OI'].sum() / df_300['CE_OI'].sum() if df_300['CE_OI'].sum() > 0 else 0
+    
+    # Rupee/Premium Weighted PCR
+    pe_rupee = (df['PE_OI'] * df['PE_LTP']).sum()
+    ce_rupee = (df['CE_OI'] * df['CE_LTP']).sum()
+    pcr_rupee = pe_rupee / ce_rupee if ce_rupee > 0 else 0
+
+    st.subheader("📊 Key Market Levels & PCR")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ATM Strike (Implied)", atm_strike)
+    c2.metric("Implied Forward", implied_fwd)
+    c3.metric("Straddle Premium", f"₹ {straddle_prem}")
+    c4.metric("PCR (Overall)", round(pcr_overall, 2))
+    
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("PCR (± 300 Pts)", round(pcr_300, 2))
+    c6.metric("PCR (Rupee Wtd)", round(pcr_rupee, 2))
+    c7.metric("Macro Call Ceiling", int(df.loc[df['CE_OI'].idxmax(), 'STRIKE']))
+    c8.metric("Macro Put Floor", int(df.loc[df['PE_OI'].idxmax(), 'STRIKE']))
+
+    # ==========================================
+    # CHART 1: TUG OF WAR (TOTAL OI)
+    # ==========================================
+    st.subheader("⚔️ Tug-of-War OI Radar (±300 Pts)")
     fig1 = go.Figure()
     fig1.add_trace(go.Bar(
-        y=df_zoom['STRIKE'], x=-df_zoom['CE_OI'],
+        y=df_300['STRIKE'], x=-df_300['CE_OI'],
         orientation='h', name='🔴 Call OI', marker_color='#ef4444',
-        text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['CE_OI']], textposition='outside'
+        text=[f"<b>{oi:.2f}L</b>" for oi in df_300['CE_OI']], textposition='outside'
     ))
     fig1.add_trace(go.Bar(
-        y=df_zoom['STRIKE'], x=df_zoom['PE_OI'],
+        y=df_300['STRIKE'], x=df_300['PE_OI'],
         orientation='h', name='🟢 Put OI', marker_color='#22c55e',
-        text=[f"<b>{oi:.2f}L</b>" for oi in df_zoom['PE_OI']], textposition='outside'
+        text=[f"<b>{oi:.2f}L</b>" for oi in df_300['PE_OI']], textposition='outside'
     ))
     fig1.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
     fig1.add_vline(x=0, line_width=2, line_color="#ffffff")
-    max_side = max(df_zoom['CE_OI'].max(), df_zoom['PE_OI'].max()) * 1.45 if not df_zoom.empty else 1
-    fig1.update_layout(barmode='overlay', height=600, xaxis=dict(range=[-max_side, max_side], title="Calls ◄ | ► Puts"))
+    max_side1 = max(df_300['CE_OI'].max(), df_300['PE_OI'].max()) * 1.45 if not df_300.empty else 1
+    fig1.update_layout(barmode='overlay', height=600, xaxis=dict(range=[-max_side1, max_side1], title="Calls ◄ | ► Puts"))
     st.plotly_chart(fig1, use_container_width=True)
 
-    # CHART 2: SESSION COMPARISON (The most important chart!)
+    # ==========================================
+    # CHART 2: ACTION BOARD (INTRADAY CHG IN OI)
+    # ==========================================
+    st.subheader("📋 Today's Change in OI (Action Board)")
+    board = df_300.copy()
+    board['NET_FLOW'] = board['PE_CHG_OI'] - board['CE_CHG_OI']
+    
+    word_labels = []
+    for _, r in board.iterrows():
+        net = r['NET_FLOW']
+        if net >= 0.35: action = "🟢 STRONG PUT FLOOR"
+        elif net >= 0.12: action = "🟢 Mild Put Support"
+        elif net <= -0.35: action = "🔴 HEAVY CALL CEILING"
+        elif net <= -0.12: action = "🔴 Mild Call Resist"
+        else: action = "⚪ Balanced Flow"
+        word_labels.append(f"<b>{net:+.2f}L</b> → {action}")
+
+    bar_colors = ['#22c55e' if v >= 0 else '#ef4444' for v in board['NET_FLOW']]
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        y=board['STRIKE'], x=board['NET_FLOW'], orientation='h',
+        marker_color=bar_colors, text=word_labels, textposition='outside'
+    ))
+    fig2.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
+    max_x2 = max(board['NET_FLOW'].abs().max(), 0.2) * 2.35 if not board.empty else 1
+    fig2.update_layout(height=600, xaxis=dict(range=[-max_x2, max_x2], title="Bearish Flow ◄ | ► Bullish Flow"))
+    st.plotly_chart(fig2, use_container_width=True)
+    
+    # ==========================================
+    # CHART 3: PURE MIDDAY SESSION COMPARISON
+    # ==========================================
     if st.session_state.morning_anchor is not None:
         st.markdown("---")
-        st.subheader("⏱️ Pure Midday Session Comparison (Anchor vs Live)")
+        st.subheader("⏱️ Session Comparison (Anchor vs Live)")
         
         df_am = st.session_state.morning_anchor
         merged = pd.merge(
