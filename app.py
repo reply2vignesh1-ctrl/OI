@@ -33,6 +33,9 @@ if 'fyers_access_token' not in st.session_state:
     st.session_state.fyers_access_token = None
 if 'fetch_now' not in st.session_state:
     st.session_state.fetch_now = False
+if 'set_anchor_flag' not in st.session_state:
+    st.session_state.set_anchor_flag = False
+    
 
 # ==========================================
 # SIDEBAR: CONTROLS & AUTH (AUTOMATED)
