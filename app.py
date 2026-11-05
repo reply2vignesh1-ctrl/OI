@@ -35,7 +35,7 @@ if 'fetch_now' not in st.session_state:
     st.session_state.fetch_now = False
 
 # ==========================================
-# SIDEBAR: CONTROLS & AUTH
+# SIDEBAR: CONTROLS & AUTH (AUTOMATED)
 # ==========================================
 with st.sidebar:
     st.header("🔌 FYERS Live Connection")
@@ -43,52 +43,41 @@ with st.sidebar:
     app_id = st.text_input("App ID", value="BJ5M8T24YW-200")
     secret_id = st.text_input("Secret ID", type="password")
     
+    # IMPORTANT: Paste your exact Streamlit app link here
+    your_app_url = "https://nifty-oi-dashboard-adsrvf7cjmbsgjn9pc4gan.streamlit.app"
+    
     st.markdown("### 🔐 Authentication")
     if app_id and secret_id:
         session = fyersModel.SessionModel(
             client_id=app_id, secret_key=secret_id, 
-            redirect_uri="https://127.0.0.1", response_type='code', grant_type='authorization_code'
+            redirect_uri=your_app_url, response_type='code', grant_type='authorization_code'
         )
-        auth_link = session.generate_authcode()
         
-        st.markdown(f"**Step 1:** [Click here to Login to FYERS]({auth_link})")
-        st.caption("After logging in, copy the entire URL from the blank page's address bar.")
-        
-        auth_input = st.text_input("**Step 2:** Paste the Redirect URL here:")
-        
-        if st.button("Connect App", use_container_width=True):
+        # 1. Automatically catch the code from the URL after FYERS redirects back
+        query_params = st.query_params
+        if 'auth_code' in query_params and st.session_state.fyers_access_token is None:
             try:
-                if "auth_code=" in auth_input:
-                    code = auth_input.split("auth_code=")[1].split("&")[0]
-                else:
-                    code = auth_input
-                    
-                session.set_token(code)
+                auth_code = query_params['auth_code']
+                session.set_token(auth_code)
                 response = session.generate_token()
                 st.session_state.fyers_access_token = response['access_token']
-                st.success("✅ Connected successfully!")
+                st.query_params.clear() # Cleans up the URL bar to look neat
+                st.rerun()
             except Exception as e:
-                st.error("Connection failed. Check your Secret ID and URL.")
+                st.error("Login failed. Please check credentials.")
+                
+        # 2. Display Login status or Button
+        if st.session_state.fyers_access_token:
+            st.success("✅ Connected successfully!")
+        else:
+            auth_link = session.generate_authcode()
+            st.markdown(f"**[👉 Click here to Login to FYERS]({auth_link})**")
 
     st.markdown("---")
     st.header("🔄 Fetch Data")
     if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
-        
-    st.markdown("---")
-    st.header("⏱️ Session Comparison")
-    if st.button("📸 Set Current Data as Morning Anchor"):
-        st.session_state.set_anchor_flag = True
-    else:
-        st.session_state.set_anchor_flag = False
-        
-    if st.session_state.morning_anchor is not None:
-        st.success("Morning anchor saved! Comparison active.")
-        if st.button("Clear Anchor"):
-            st.session_state.morning_anchor = None
-            if os.path.exists("anchor_data.csv"): os.remove("anchor_data.csv")
-            if os.path.exists("anchor_date.txt"): os.remove("anchor_date.txt")
-            st.rerun()
+
 
 # ==========================================
 # FYERS DATA FETCHER (NATIVE OPTION CHAIN)
