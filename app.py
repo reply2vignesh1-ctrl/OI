@@ -18,12 +18,10 @@ st.title("🎯 Live NIFTY Options OI Dashboard (FYERS)")
 if 'morning_anchor' not in st.session_state:
     st.session_state.morning_anchor = None
     
-    # Check if a physical anchor file was already saved today
     if os.path.exists("anchor_data.csv") and os.path.exists("anchor_date.txt"):
         with open("anchor_date.txt", "r") as f:
             saved_date = f.read().strip()
             
-        # Only load it if it is actually from today
         if saved_date == datetime.now().strftime("%Y-%m-%d"):
             st.session_state.morning_anchor = pd.read_csv("anchor_data.csv")
 
@@ -35,7 +33,6 @@ if 'fetch_now' not in st.session_state:
     st.session_state.fetch_now = False
 if 'set_anchor_flag' not in st.session_state:
     st.session_state.set_anchor_flag = False
-    
 
 # ==========================================
 # SIDEBAR: CONTROLS & AUTH
@@ -46,6 +43,7 @@ with st.sidebar:
     app_id = st.text_input("App ID", value="BJ5M8T24YW-200")
     secret_id = st.text_input("Secret ID", type="password")
     
+    # IMPORTANT: Paste your exact Streamlit app link here
     your_app_url = "https://nifty-oi-dashboard-adsrvf7cjmbsgjn9pc4gan.streamlit.app"
     
     st.markdown("### 🔐 Authentication")
@@ -78,7 +76,6 @@ with st.sidebar:
     if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
         
-    # THIS IS THE MISSING BLOCK I FORGOT:
     st.markdown("---")
     st.header("⏱️ Session Comparison")
     if st.button("📸 Set Current Data as Morning Anchor"):
@@ -94,10 +91,8 @@ with st.sidebar:
             if os.path.exists("anchor_date.txt"): os.remove("anchor_date.txt")
             st.rerun()
 
-
-
 # ==========================================
-# FYERS DATA FETCHER (NATIVE OPTION CHAIN)
+# FYERS DATA FETCHER
 # ==========================================
 def fetch_fyers_oc(client_id, access_token):
     fyers = fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
@@ -129,8 +124,8 @@ def fetch_fyers_oc(client_id, access_token):
             records.append({
                 'STRIKE': int(opt.get('strike_price', 0)),
                 'TYPE': opt_type,
-                'OI': current_oi / 1000.0,
-                'CHG_OI': (current_oi - prev_oi) / 1000.0,
+                'OI': current_oi / 100000.0,
+                'CHG_OI': (current_oi - prev_oi) / 100000.0,
                 'LTP': opt.get('ltp', 0),
                 'IV': opt.get('iv', 0)
             })
@@ -213,12 +208,12 @@ if df is not None and not df.empty:
     fig1.add_trace(go.Bar(
         y=df_300['STRIKE'], x=-df_300['CE_OI'],
         orientation='h', name='🔴 Call OI', marker_color='#ef4444',
-        text=[f"<b>{oi:.1f}K</b>" for oi in df_300['CE_OI']], textposition='outside'
+        text=[f"<b>{oi:.2f}L</b>" for oi in df_300['CE_OI']], textposition='outside'
     ))
     fig1.add_trace(go.Bar(
         y=df_300['STRIKE'], x=df_300['PE_OI'],
         orientation='h', name='🟢 Put OI', marker_color='#22c55e',
-        text=[f"<b>{oi:.1f}K</b>" for oi in df_300['PE_OI']], textposition='outside'
+        text=[f"<b>{oi:.2f}L</b>" for oi in df_300['PE_OI']], textposition='outside'
     ))
     fig1.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
     fig1.add_vline(x=0, line_width=2, line_color="#ffffff")
@@ -234,12 +229,12 @@ if df is not None and not df.empty:
     word_labels = []
     for _, r in board.iterrows():
         net = r['NET_FLOW']
-        if net >= 35.0: action = "🟢 STRONG PUT FLOOR"
-        elif net >= 12.0: action = "🟢 Mild Put Support"
-        elif net <= -35.0: action = "🔴 HEAVY CALL CEILING"
-        elif net <= -12.0: action = "🔴 Mild Call Resist"
+        if net >= 0.35: action = "🟢 STRONG PUT FLOOR"
+        elif net >= 0.12: action = "🟢 Mild Put Support"
+        elif net <= -0.35: action = "🔴 HEAVY CALL CEILING"
+        elif net <= -0.12: action = "🔴 Mild Call Resist"
         else: action = "⚪ Balanced Flow"
-        word_labels.append(f"<b>{net:+.1f}K</b> → {action}")
+        word_labels.append(f"<b>{net:+.2f}L</b> → {action}")
 
     bar_colors = ['#22c55e' if v >= 0 else '#ef4444' for v in board['NET_FLOW']]
     fig2 = go.Figure()
@@ -248,7 +243,7 @@ if df is not None and not df.empty:
         marker_color=bar_colors, text=word_labels, textposition='outside'
     ))
     fig2.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
-    max_x2 = max(board['NET_FLOW'].abs().max(), 20.0) * 2.35 if not board.empty else 1
+    max_x2 = max(board['NET_FLOW'].abs().max(), 0.2) * 2.35 if not board.empty else 1
     fig2.update_layout(height=600, xaxis=dict(range=[-max_x2, max_x2], title="Bearish Flow ◄ | ► Bullish Flow"))
     st.plotly_chart(fig2, use_container_width=True)
     
@@ -271,10 +266,10 @@ if df is not None and not df.empty:
         labels = []
         for _, r in m_view.iterrows():
             net_d = r['NET_DELTA']
-            if net_d >= 10.0: text = "Net Put Built"
-            elif net_d <= -10.0: text = "Net Call Built"
+            if net_d >= 0.10: text = "Net Put Built"
+            elif net_d <= -0.10: text = "Net Call Built"
             else: text = "Minimal Change"
-            labels.append(f"<b>{net_d:+.1f}K</b> → {text}")
+            labels.append(f"<b>{net_d:+.2f}L</b> → {text}")
 
         colors3 = ['#22c55e' if v >= 0 else '#ef4444' for v in m_view['NET_DELTA']]
         fig3 = go.Figure()
@@ -283,7 +278,7 @@ if df is not None and not df.empty:
             marker_color=colors3, text=labels, textposition='outside'
         ))
         fig3.add_hline(y=atm_strike, line_dash="dash", line_color="#facc15")
-        max_x3 = max(m_view['NET_DELTA'].abs().max(), 15.0) * 2.10 if not m_view.empty else 1
+        max_x3 = max(m_view['NET_DELTA'].abs().max(), 0.15) * 2.10 if not m_view.empty else 1
         fig3.update_layout(height=600, xaxis=dict(range=[-max_x3, max_x3], title="Net Call Add ◄ | ► Net Put Add"))
         st.plotly_chart(fig3, use_container_width=True)
 
