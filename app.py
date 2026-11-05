@@ -38,7 +38,7 @@ if 'set_anchor_flag' not in st.session_state:
     
 
 # ==========================================
-# SIDEBAR: CONTROLS & AUTH (AUTOMATED)
+# SIDEBAR: CONTROLS & AUTH
 # ==========================================
 with st.sidebar:
     st.header("🔌 FYERS Live Connection")
@@ -46,7 +46,6 @@ with st.sidebar:
     app_id = st.text_input("App ID", value="BJ5M8T24YW-200")
     secret_id = st.text_input("Secret ID", type="password")
     
-    # IMPORTANT: Paste your exact Streamlit app link here
     your_app_url = "https://nifty-oi-dashboard-adsrvf7cjmbsgjn9pc4gan.streamlit.app"
     
     st.markdown("### 🔐 Authentication")
@@ -56,7 +55,6 @@ with st.sidebar:
             redirect_uri=your_app_url, response_type='code', grant_type='authorization_code'
         )
         
-        # 1. Automatically catch the code from the URL after FYERS redirects back
         query_params = st.query_params
         if 'auth_code' in query_params and st.session_state.fyers_access_token is None:
             try:
@@ -64,12 +62,11 @@ with st.sidebar:
                 session.set_token(auth_code)
                 response = session.generate_token()
                 st.session_state.fyers_access_token = response['access_token']
-                st.query_params.clear() # Cleans up the URL bar to look neat
+                st.query_params.clear() 
                 st.rerun()
             except Exception as e:
                 st.error("Login failed. Please check credentials.")
                 
-        # 2. Display Login status or Button
         if st.session_state.fyers_access_token:
             st.success("✅ Connected successfully!")
         else:
@@ -80,6 +77,23 @@ with st.sidebar:
     st.header("🔄 Fetch Data")
     if st.button("Fetch Live Data", use_container_width=True):
         st.session_state.fetch_now = True
+        
+    # THIS IS THE MISSING BLOCK I FORGOT:
+    st.markdown("---")
+    st.header("⏱️ Session Comparison")
+    if st.button("📸 Set Current Data as Morning Anchor"):
+        st.session_state.set_anchor_flag = True
+    else:
+        st.session_state.set_anchor_flag = False
+        
+    if st.session_state.morning_anchor is not None:
+        st.success("Morning anchor saved! Comparison active.")
+        if st.button("Clear Anchor"):
+            st.session_state.morning_anchor = None
+            if os.path.exists("anchor_data.csv"): os.remove("anchor_data.csv")
+            if os.path.exists("anchor_date.txt"): os.remove("anchor_date.txt")
+            st.rerun()
+
 
 
 # ==========================================
