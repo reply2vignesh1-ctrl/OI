@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from fyers_apiv3 import fyersModel
 from datetime import datetime
+import os
 
 # ==========================================
 # PAGE CONFIGURATION
@@ -14,12 +15,23 @@ st.title("🎯 Live NIFTY Options OI Dashboard (FYERS)")
 # Initialize Session States
 if 'morning_anchor' not in st.session_state:
     st.session_state.morning_anchor = None
+    
+    # Check if a physical anchor file was already saved today
+    if os.path.exists("anchor_data.csv") and os.path.exists("anchor_date.txt"):
+        with open("anchor_date.txt", "r") as f:
+            saved_date = f.read().strip()
+            
+        # Only load it if it is actually from today
+        if saved_date == datetime.now().strftime("%Y-%m-%d"):
+            st.session_state.morning_anchor = pd.read_csv("anchor_data.csv")
+
 if 'live_df' not in st.session_state:
     st.session_state.live_df = None
 if 'fyers_access_token' not in st.session_state:
     st.session_state.fyers_access_token = None
 if 'fetch_now' not in st.session_state:
     st.session_state.fetch_now = False
+    
 
 # ==========================================
 # SIDEBAR: CONTROLS & AUTH
